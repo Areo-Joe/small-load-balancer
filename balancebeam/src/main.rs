@@ -6,6 +6,7 @@ use rand::{Rng, SeedableRng};
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::sync::Arc;
+use crossbeam_channel;
 
 /// Contains information parsed from the command-line invocation of balancebeam. The Clap macros
 /// provide a fancy way to automatically construct a command-line argument parser.
@@ -96,22 +97,42 @@ fn main() {
     };
     let state = Arc::new(state);
 
-    let mut thread_handles = Vec::new();
+    // let mut thread_handles = Vec::new();
+    let thread_num = 4;
+    let mut thread_handles = Vec::with_capacity(thread_num);
+    let (s, r) = crossbeam_channel::unbounded();
+    for _ in 0..thread_num {
+        let state = state.clone();
+        let r = r.clone();
+        thread_handles.push(thread::spawn(move || {
+            loop {
+                match r.recv() {
+                    Ok(stream) => handle_connection(stream, &state),
+                    Err(_) => break
+                }
+            }
+        }));
+    }
     for stream in listener.incoming() {
         if let Ok(stream) = stream {
-            // Handle the connection!
-            let state = state.clone();
-            thread_handles.push(thread::spawn(|| {
-                handle_connection(stream, state)
-            }));
+            s.send(stream).unwrap();
         }
     }
+    // for stream in listener.incoming() {
+    //     if let Ok(stream) = stream {
+    //         // Handle the connection!
+    //         let state = state.clone();
+    //         thread_handles.push(thread::spawn(|| {
+    //             handle_connection(stream, state)
+    //         }));
+    //     }
+    // }
     for handle in thread_handles {
         handle.join().unwrap();
     }
 }
 
-fn connect_to_upstream(state: Arc<ProxyState>) -> Result<TcpStream, std::io::Error> {
+fn connect_to_upstream(state: &Arc<ProxyState>) -> Result<TcpStream, std::io::Error> {
     let mut rng = rand::rngs::StdRng::from_entropy();
     let upstream_idx = rng.gen_range(0, state.upstream_addresses.len());
     let upstream_ip = &state.upstream_addresses[upstream_idx];
@@ -131,7 +152,7 @@ fn send_response(client_conn: &mut TcpStream, response: &http::Response<Vec<u8>>
     }
 }
 
-fn handle_connection(mut client_conn: TcpStream, state: Arc<ProxyState>) {
+fn handle_connection(mut client_conn: TcpStream, state: &Arc<ProxyState>) {
     let client_ip = client_conn.peer_addr().unwrap().ip().to_string();
     log::info!("Connection received from {}", client_ip);
 
